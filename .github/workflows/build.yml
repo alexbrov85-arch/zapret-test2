@@ -1,9 +1,6 @@
 name: Build YouTube Zapret APK
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+on: push
 
 permissions:
   contents: read
@@ -142,3 +139,5 @@ jobs:
           name: YouTube-Zapret-arm64
           path: YouTube-Zapret-arm64.apk
           if-no-files-found: error
+
+# retrigger build
