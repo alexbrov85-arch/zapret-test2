@@ -1,6 +1,10 @@
 name: Build YouTube Zapret APK
 
-on: push
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
 
 permissions:
   contents: read
