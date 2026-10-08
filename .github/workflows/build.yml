@@ -1,0 +1,144 @@
+name: Build YouTube Zapret APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout custom project
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Clone z2a source
+        run: |
+          git clone --depth 1 https://github.com/necronicle/z2a.git z2a
+          rm -rf z2a/.git
+
+      - name: Extract ARM64 nfqws2 from official z2a APK
+        working-directory: z2a
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          curl -L --fail --retry 3             -o /tmp/z2a.apk             https://github.com/necronicle/z2a/releases/download/v1.0.0/z2a-v1.0.0.apk
+          unzip -l /tmp/z2a.apk | grep 'lib/arm64-v8a/libnfqws2.so'
+          unzip -p /tmp/z2a.apk lib/arm64-v8a/libnfqws2.so > app/src/main/jniLibs/arm64-v8a/libnfqws2.so
+          test -s app/src/main/jniLibs/arm64-v8a/libnfqws2.so
+
+      - name: Make YouTube-only app
+        working-directory: z2a
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # App identity
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+          s = s.replace('applicationId = "com.z2a"', 'applicationId = "com.alex.youtubezapret"')
+          s = s.replace('versionName = "1.0.0"', 'versionName = "1.0-youtube"')
+          s = s.replace('targetSdk = 35', 'targetSdk = 35\n        ndk { abiFilters += listOf("arm64-v8a") }')
+          p.write_text(s)
+
+          # UI label
+          p = Path("app/src/main/res/values/strings.xml")
+          s = p.read_text().replace('<string name="app_name">z2a</string>',
+                                    '<string name="app_name">YouTube Zapret</string>')
+          s = s.replace('z2a DPI Bypass', 'YouTube DPI Bypass')
+          s = s.replace('z2a активен', 'YouTube Zapret активен')
+          p.write_text(s)
+
+          # Only expose YouTube profiles in the UI.
+          p = Path("app/src/main/java/com/z2a/data/ProfileRepository.kt")
+          s = p.read_text()
+          start = s.index('        _profiles.value = listOf(')
+          end = s.index('\n    }\n\n    private fun loadDomainCounts', start)
+          replacement = '''        _profiles.value = listOf(
+            Profile(
+                id = "yt_tcp",
+                name = "YouTube TCP",
+                type = ProfileType.YOUTUBE_TCP,
+                hostlistFile = "hostlists/TCP_YT_List.txt",
+                strategyCount = 22,
+                domainCount = domainCounts["TCP_YT_List.txt"] ?: 0,
+                ports = "443,2053,2083,2087,2096,8443",
+                protocol = ProtocolType.TCP
+            ),
+            Profile(
+                id = "yt_gv",
+                name = "Google Video",
+                type = ProfileType.YOUTUBE_GV,
+                hostlistFile = "hostlists/TCP_YT_List.txt",
+                strategyCount = 22,
+                domainCount = 1,
+                ports = "443",
+                protocol = ProtocolType.TCP
+            ),
+            Profile(
+                id = "yt_quic",
+                name = "YouTube QUIC",
+                type = ProfileType.YOUTUBE_QUIC,
+                hostlistFile = "hostlists/UDP_YT_List.txt",
+                strategyCount = 12,
+                domainCount = domainCounts["UDP_YT_List.txt"] ?: 0,
+                ports = "443",
+                protocol = ProtocolType.UDP
+            )
+        )'''
+          s = s[:start] + replacement + s[end:]
+          p.write_text(s)
+
+          # Keep only the three YouTube/Google Video engine profiles.
+          src = Path("app/src/main/assets/profiles.default.txt").read_text().splitlines()
+          keep = [line for line in src if (
+              "hostlists/TCP_YT_List.txt" in line or
+              "hostlist-domains=googlevideo.com" in line or
+              "hostlists/UDP_YT_List.txt" in line
+          )]
+          if len(keep) != 3:
+              raise SystemExit(f"Expected 3 YouTube profiles, found {len(keep)}")
+          Path("app/src/main/assets/profiles.default.txt").write_text("\n".join(keep) + "\n")
+
+          # Ensure bundled native libraries are picked up.
+          p = Path("app/build.gradle.kts")
+          s = p.read_text()
+          marker = '    buildFeatures {\n'
+          if 'jniLibs.srcDir' not in s:
+              s = s.replace(marker, '    sourceSets["main"].jniLibs.srcDir("src/main/jniLibs")\n\n' + marker)
+          p.write_text(s)
+          PY
+
+      - name: Generate signing key
+        working-directory: z2a
+        run: |
+          keytool -genkeypair -v             -keystore youtube-zapret-release.jks             -keyalg RSA -keysize 2048 -validity 10000             -alias youtube-zapret             -storepass youtube_zapret             -keypass youtube_zapret             -dname "CN=YouTube Zapret, O=Alex, C=FI"
+
+      - name: Build APK
+        working-directory: z2a
+        run: ./gradlew assembleRelease
+        env:
+          Z2A_STORE_FILE: youtube-zapret-release.jks
+          Z2A_STORE_PASSWORD: youtube_zapret
+          Z2A_KEY_ALIAS: youtube-zapret
+          Z2A_KEY_PASSWORD: youtube_zapret
+
+      - name: Rename APK
+        working-directory: z2a
+        run: cp app/build/outputs/apk/release/app-release.apk ../YouTube-Zapret-arm64.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube-Zapret-arm64
+          path: YouTube-Zapret-arm64.apk
+          if-no-files-found: error
